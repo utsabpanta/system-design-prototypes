@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cell Architecture — Live View</title>
+<style>
+  :root {
+    --bg: #0e1116; --panel: #161b22; --line: #262d36;
+    --text: #e6edf3; --muted: #8b949e;
+    --ok: #3fb950; --warn: #d29922; --bad: #f85149; --accent: #58a6ff;
+    --silo: #bc8cff;
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font-size: 13px; }
+  header {
+    display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap;
+    padding: 14px 20px; border-bottom: 1px solid var(--line);
+    position: sticky; top: 0; background: var(--bg); z-index: 2;
+  }
+  h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .3px; }
+  .totals { display: flex; gap: 18px; color: var(--muted); margin-left: auto; flex-wrap: wrap; }
+  .totals b { color: var(--text); font-weight: 600; }
+  main { padding: 20px; display: grid; gap: 20px; }
+  .grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); }
+
+  .cell {
+    background: var(--panel); border: 1px solid var(--line);
+    border-left: 3px solid var(--ok); border-radius: 6px; padding: 14px;
+    transition: border-color .2s, background .2s;
+  }
+  .cell.warn { border-left-color: var(--warn); background: #1d1a10; }
+  .cell.bad  { border-left-color: var(--bad);  background: #1f1315; }
+
+  .cell-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+  .cell-id { font-size: 14px; font-weight: 600; }
+  .tag {
+    font-size: 10px; padding: 2px 6px; border-radius: 3px;
+    border: 1px solid var(--line); color: var(--muted); text-transform: uppercase;
+  }
+  .tag.silo { color: var(--silo); border-color: var(--silo); }
+  .fault { margin-left: auto; font-size: 11px; }
+  .fault.none { color: var(--muted); }
+  .fault.active { color: var(--bad); font-weight: 600; }
+
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 10px; }
+  .stat { background: #0d1117; border: 1px solid var(--line); border-radius: 4px; padding: 6px 8px; }
+  .stat .k { color: var(--muted); font-size: 10px; text-transform: uppercase; }
+  .stat .v { font-size: 15px; font-weight: 600; }
+  .v.bad { color: var(--bad); } .v.warn { color: var(--warn); } .v.ok { color: var(--ok); }
+
+  table { width: 100%; border-collapse: collapse; }
+  th { text-align: left; color: var(--muted); font-weight: 500; font-size: 10px;
+       text-transform: uppercase; padding: 4px 6px; border-bottom: 1px solid var(--line); }
+  td { padding: 4px 6px; border-bottom: 1px solid #1c222b; }
+  tr:last-child td { border-bottom: none; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .premium { color: var(--silo); }
+  .st-READ_ONLY { color: var(--warn); font-weight: 600; }
+  .st-SUSPENDED { color: var(--bad); }
+  .empty { color: var(--muted); font-style: italic; padding: 8px 6px; }
+
+  .bar { height: 3px; background: #0d1117; border-radius: 2px; overflow: hidden; margin-top: 8px; }
+  .bar > i { display: block; height: 100%; background: var(--accent); }
+  .bar > i.full { background: var(--warn); }
+
+  footer { color: var(--muted); padding: 0 20px 24px; line-height: 1.7; }
+  code { background: var(--panel); padding: 1px 5px; border-radius: 3px; color: var(--accent); }
+  #err { color: var(--bad); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Cell Architecture — Live View</h1>
+  <span id="err"></span>
+  <div class="totals">
+    <span>cells <b id="t-cells">–</b></span>
+    <span>tenants <b id="t-tenants">–</b></span>
+    <span>migrating <b id="t-migrating">–</b></span>
+    <span>unhealthy <b id="t-unhealthy">–</b></span>
+    <span>router rps <b id="t-rps">–</b></span>
+    <span id="t-updated">–</span>
+  </div>
+</header>
+
+<main>
+  <div class="grid" id="cells"></div>
+</main>
+
+<footer>
+  Metrics are a 5-minute rolling window, pulled from each cell on demand — cells never push to the control plane.<br>
+  Try: <code>npm run chaos -- set cell-a error</code> · <code>npm run load -- --scenario noisy-neighbor</code> · <code>npm run migrate -- --tenant acme --to cell-b</code>
+</footer>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const num = (n) => (n ?? 0).toLocaleString();
+
+function cellClass(cell) {
+  if (!cell.healthy) return 'cell bad';
+  const m = cell.metrics;
+  if (m && m.requests > 0 && m.errors / m.requests > 0.05) return 'cell bad';
+  if ((m && m.throttled > 0) || (cell.queue && cell.queue.dlq > 0)) return 'cell warn';
+  return 'cell';
+}
+
+function renderCell(cell) {
+  const m = cell.metrics ?? { requests: 0, errors: 0, throttled: 0, avgLatencyMs: 0, byTenant: {} };
+  const q = cell.queue ?? { visible: 0, inFlight: 0, dlq: 0 };
+  const fill = Math.min(100, Math.round((cell.tenants.length / cell.capacity) * 100));
+
+  const rows = cell.tenants.length
+    ? cell.tenants.map((t) => {
+        const tm = m.byTenant?.[t.tenantId] ?? { requests: 0, errors: 0, throttled: 0 };
+        return `<tr>
+          <td class="${t.tier === 'premium' ? 'premium' : ''}">${t.tenantId}</td>
+          <td class="st-${t.status}">${t.status === 'ACTIVE' ? '' : t.status}</td>
+          <td class="num">${num(tm.requests)}</td>
+          <td class="num" style="color:${tm.errors ? 'var(--bad)' : 'inherit'}">${num(tm.errors)}</td>
+          <td class="num" style="color:${tm.throttled ? 'var(--warn)' : 'inherit'}">${num(tm.throttled)}</td>
+        </tr>`;
+      }).join('')
+    : '<tr><td colspan="5" class="empty">no tenants placed</td></tr>';
+
+  return `<div class="${cellClass(cell)}">
+    <div class="cell-head">
+      <span class="cell-id">${cell.cellId}</span>
+      <span class="tag ${cell.tier}">${cell.tier}</span>
+      <span class="fault ${cell.fault === 'none' ? 'none' : 'active'}">
+        ${cell.fault === 'none' ? 'healthy' : '⚠ ' + cell.fault}
+      </span>
+    </div>
+    <div class="stats">
+      <div class="stat"><div class="k">req/5m</div><div class="v">${num(m.requests)}</div></div>
+      <div class="stat"><div class="k">errors</div><div class="v ${m.errors ? 'bad' : 'ok'}">${num(m.errors)}</div></div>
+      <div class="stat"><div class="k">429s</div><div class="v ${m.throttled ? 'warn' : 'ok'}">${num(m.throttled)}</div></div>
+      <div class="stat"><div class="k">avg ms</div><div class="v">${num(m.avgLatencyMs)}</div></div>
+    </div>
+    <div class="stats">
+      <div class="stat"><div class="k">queued</div><div class="v">${num(q.visible)}</div></div>
+      <div class="stat"><div class="k">in flight</div><div class="v">${num(q.inFlight)}</div></div>
+      <div class="stat"><div class="k">dlq</div><div class="v ${q.dlq ? 'warn' : 'ok'}">${num(q.dlq)}</div></div>
+      <div class="stat"><div class="k">tenants</div><div class="v">${cell.tenants.length}/${cell.capacity}</div></div>
+    </div>
+    <div class="bar"><i class="${fill >= 100 ? 'full' : ''}" style="width:${fill}%"></i></div>
+    <table>
+      <thead><tr><th>tenant</th><th></th><th class="num">req</th><th class="num">err</th><th class="num">429</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  </div>`;
+}
+
+async function tick() {
+  try {
+    const res = await fetch('/api/overview');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    $('err').textContent = '';
+
+    $('t-cells').textContent = data.totals.cells;
+    $('t-tenants').textContent = data.totals.tenants;
+    $('t-migrating').textContent = data.totals.migrating;
+    $('t-unhealthy').textContent = data.totals.unhealthyCells;
+    $('t-rps').textContent = data.router
+      ? (data.router.requests / (data.router.windowMinutes * 60)).toFixed(1)
+      : '–';
+    $('t-updated').textContent = new Date(data.generatedAt).toLocaleTimeString();
+
+    $('cells').innerHTML = data.cells.map(renderCell).join('');
+  } catch (err) {
+    $('err').textContent = 'poll failed: ' + err.message;
+  }
+}
+
+tick();
+setInterval(tick, 2000);
+</script>
+</body>
+</html>

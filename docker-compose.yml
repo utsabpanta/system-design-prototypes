@@ -1,0 +1,33 @@
+services:
+  localstack:
+    container_name: sdp-localstack
+    image: localstack/localstack:4.3
+    ports:
+      - "4566:4566"            # single edge port for every AWS service
+      - "4510-4559:4510-4559"  # external service ports (lambda, etc.)
+    environment:
+      - DEBUG=${DEBUG:-0}
+      - AWS_DEFAULT_REGION=us-east-1
+      # IAM policy enforcement is best-effort on the free tier. Flip to 1 to try
+      # enforcing the per-tenant scoped credentials the api Lambda vends.
+      - ENFORCE_IAM=${ENFORCE_IAM:-0}
+      # Lambdas run as sibling containers via the mounted docker socket, so
+      # "concurrency" here means "simultaneous Docker containers". A burst of
+      # 30 wedged the whole LocalStack instance during development, which is
+      # the single biggest way this environment differs from real AWS.
+      #
+      # The cap makes LocalStack throttle like Lambda does instead of trying to
+      # start containers until the machine gives up; the shorter keepalive
+      # reaps idle ones instead of holding them for ten minutes.
+      - LAMBDA_RUNTIME_ENVIRONMENT_TIMEOUT=90
+      - LAMBDA_KEEPALIVE_MS=120000
+      - LAMBDA_LIMITS_CONCURRENT_EXECUTIONS=25
+    volumes:
+      - "./.localstack:/var/lib/localstack"
+      - "/var/run/docker.sock:/var/run/docker.sock"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:4566/_localstack/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s

@@ -1,0 +1,14 @@
+{
+  "app": "npx tsx infra/bin/app.ts",
+  "output": "cdk.out",
+  "watch": {
+    "include": ["infra/**", "packages/**"],
+    "exclude": ["node_modules/**", "cdk.out/**"]
+  },
+  "context": {
+    "@aws-cdk/aws-lambda:recognizeLayerVersion": true,
+    "@aws-cdk/core:checkSecretUsage": true,
+    "@aws-cdk/aws-iam:minimizePolicies": true,
+    "@aws-cdk/core:target-partitions": ["aws"]
+  }
+}
