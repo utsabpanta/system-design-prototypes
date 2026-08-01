@@ -79,6 +79,51 @@ Cells are usually kept deliberately *small*. A bigger cell serves more customers
 which means a bigger blast radius when it fails — so cells have a **capacity**,
 and growth is handled by adding cells rather than growing them.
 
+#### How many tenants live in one cell?
+
+**One or many — it is a per-cell policy choice, not a property of cells.** A cell
+holding many tenants is called *pooled*; a cell holding exactly one is called
+*silo*. Both are ordinary cells.
+
+In this prototype the entire difference is the `capacity` number in
+[`infra/lib/cells.config.ts`](./infra/lib/cells.config.ts):
+
+```ts
+// abridged — the real entries also carry reservedConcurrency
+{ id: 'cell-a', tier: 'pooled', capacity: 5, ... },   // up to 5 tenants share it
+{ id: 'cell-b', tier: 'pooled', capacity: 5, ... },   // up to 5 tenants share it
+{ id: 'cell-c', tier: 'silo',   capacity: 1, ... },   // exactly one tenant, alone
+```
+
+Change `cell-c`'s capacity to `5` and it becomes a pooled cell. The `tier` field
+is a label describing intent; `capacity` is what actually enforces it. Run
+`pnpm run tenant list` to see current occupancy.
+
+Two axes are easy to merge here, and they answer different questions:
+
+| | Question it answers | Consequence |
+|---|---|---|
+| **Cell** | How big is the blast radius when this breaks? | Everyone in the cell is affected — whether that is 1 tenant or 500 |
+| **Pooled vs silo** | Do tenants share a database and compute? | Whether isolation depends on your code being correct, and whether noisy neighbours are possible at all |
+
+A silo cell gets both properties at once — nobody else to affect, nobody else to
+be affected by. That is what a premium tenant is paying for.
+
+#### And the reverse: how many cells does one tenant live in?
+
+**Exactly one, always.** A tenant is never split across cells: all of `acme`'s
+data sits in one cell's table, served by one cell's compute.
+
+That constraint is deliberate. It is what makes a tenant's blast radius knowable
+— "acme is affected if and only if cell-b is down" — and it is why moving a
+tenant is a discrete, verifiable **migration** (§4) rather than a continuous
+rebalancing problem.
+
+It also sets a real ceiling: **a single tenant can never outgrow one cell.** If
+one arrives needing more than a cell's worth of capacity, the options are a
+larger cell type or sharding *within* that tenant's silo. This prototype does not
+tackle that case.
+
 ### Tenant
 
 A **tenant** is one customer of your system — a company, an organisation, an
@@ -136,7 +181,8 @@ why this prototype uses a Lambda instead.
 
 ### Tenant isolation: pooled, silo, and bridge
 
-How much do tenants actually share? Three standard answers:
+The previous section covered *how many* tenants share a cell. This one is about
+what that sharing costs you. Three standard answers:
 
 | Model | What it means | Upside | Downside |
 |---|---|---|---|
@@ -149,9 +195,9 @@ share a pooled cell, partitioned by `pk = TENANT#<id>`; `premium` tenants get a
 silo cell to themselves. Placement logic lives in
 [`packages/shared/placement.ts`](./packages/shared/placement.ts).
 
-Note that a *cell* and a *silo* are different ideas that are easy to conflate.
-Cells limit blast radius for everyone. A silo cell is just a cell whose capacity
-happens to be one tenant.
+The model is per *cell*, not per system — one deployment runs pooled and silo
+cells side by side, and a tenant moves between them by
+[migrating](#4-tenant-migration).
 
 ### Noisy neighbour
 
