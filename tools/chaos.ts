@@ -1,11 +1,11 @@
 /**
  * Fault injection CLI.
  *
- *   npm run chaos -- status
- *   npm run chaos -- set cell-a error
- *   npm run chaos -- set cell-b latency
- *   npm run chaos -- clear cell-a
- *   npm run chaos -- clear-all
+ *   pnpm run chaos status
+ *   pnpm run chaos set cell-a error
+ *   pnpm run chaos set cell-b latency
+ *   pnpm run chaos clear cell-a
+ *   pnpm run chaos clear-all
  *
  * Writes /cells/<id>/fault in SSM. Cell code reads it with a 2s cache, so a
  * fault takes effect within a couple of seconds and needs no redeploy.

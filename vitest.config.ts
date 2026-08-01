@@ -1,7 +1,7 @@
 import { defineConfig } from 'vitest/config';
 
 // Defaulted here rather than only in tools/with-local-env.sh so that running
-// `npx vitest` or an IDE's test runner directly still points at LocalStack
+// `pnpm vitest` or an IDE's test runner directly still points at LocalStack
 // instead of failing with an opaque credentials error.
 process.env.AWS_ENDPOINT_URL ??= 'http://localhost:4566';
 process.env.AWS_ACCESS_KEY_ID ??= 'test';
@@ -13,7 +13,7 @@ export default defineConfig({
   test: {
     include: ['test/**/*.test.ts'],
     // *.slow.test.ts covers behaviour that is real but takes minutes to
-    // observe locally (SQS redrive). Run it with `npm run test:slow`.
+    // observe locally (SQS redrive). Run it with `pnpm run test:slow`.
     exclude: ['**/node_modules/**', 'test/**/*.slow.test.ts'],
     // LocalStack runs every Lambda invocation as a Docker container, so test
     // parallelism translates directly into container concurrency. Running the

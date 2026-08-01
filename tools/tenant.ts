@@ -2,9 +2,9 @@
  * Tenant CLI — onboard and inspect without hand-assembling curl commands
  * against an endpoint whose hostname changes on every LocalStack reset.
  *
- *   npm run tenant -- list
- *   npm run tenant -- add newco --tier premium
- *   npm run tenant -- show acme
+ *   pnpm run tenant list
+ *   pnpm run tenant add newco --tier premium
+ *   pnpm run tenant show acme
  */
 import { adminEndpoint, call } from '../packages/shared/endpoints.js';
 import type { CellRecord, RoutingEntry, Tenant } from '../packages/shared/types.js';
@@ -44,7 +44,7 @@ async function main(): Promise<void> {
   }
 
   if (command === 'add') {
-    if (!target) throw new Error('usage: npm run tenant -- add <tenantId> [--tier premium]');
+    if (!target) throw new Error('usage: pnpm run tenant add <tenantId> [--tier premium]');
     const res = await call<{ routing: RoutingEntry; created: boolean }>(
       `${admin}/admin/tenants`,
       { method: 'POST', body: { tenantId: target, tier: flag('tier') ?? 'standard' } },
@@ -62,7 +62,7 @@ async function main(): Promise<void> {
   }
 
   if (command === 'show') {
-    if (!target) throw new Error('usage: npm run tenant -- show <tenantId>');
+    if (!target) throw new Error('usage: pnpm run tenant show <tenantId>');
     const res = await call(`${admin}/admin/tenants/${target}`);
     console.log(JSON.stringify(res.body, null, 2));
     return;

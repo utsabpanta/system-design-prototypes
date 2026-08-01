@@ -1,8 +1,8 @@
 /**
  * Tenant migration CLI.
  *
- *   npm run migrate -- --tenant acme --to cell-b
- *   npm run migrate -- --tenant acme --to cell-b --fail-after-copy   # rollback drill
+ *   pnpm run migrate --tenant acme --to cell-b
+ *   pnpm run migrate --tenant acme --to cell-b --fail-after-copy   # rollback drill
  *
  * Follows the state machine to completion and prints where the tenant ends up.
  */
@@ -27,7 +27,7 @@ async function main(): Promise<void> {
   const failAfterCopy = process.argv.includes('--fail-after-copy');
 
   if (!tenantId || !targetCellId) {
-    throw new Error('usage: npm run migrate -- --tenant <id> --to <cellId> [--fail-after-copy]');
+    throw new Error('usage: pnpm run migrate --tenant <id> --to <cellId> [--fail-after-copy]');
   }
 
   const admin = await adminEndpoint();

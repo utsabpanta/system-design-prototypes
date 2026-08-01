@@ -1,184 +1,188 @@
 # Cell-Based Multi-Tenant Architecture — a runnable prototype
 
 A working multi-tenant system built the way it would be built on AWS — real CDK,
-real CloudFormation, real AWS APIs — but deployed entirely to LocalStack on a laptop.
+real CloudFormation, real AWS APIs — but deployed entirely to **LocalStack on your
+laptop**. No AWS account, no cloud spend.
 
-The point is not the task API it happens to serve. The point is that the properties
+The point is not the task API it happens to serve. The point is that properties
 usually asserted in design docs are things you can **trigger and watch**:
 
 | Claim | How to see it |
 |---|---|
-| A failing cell doesn't take down other cells | `npm run chaos -- set cell-a error`, then watch the other cells keep serving |
-| One tenant can't starve its neighbours | `npm run load -- --scenario noisy-neighbor` |
-| A tenant's data is unreachable to co-tenants | `npm test` → `isolation.test.ts` |
-| A live tenant can be moved between cells | `npm run migrate -- --tenant acme --to cell-b` |
-| A failed migration leaves no trace | `npm run migrate -- --tenant acme --to cell-b --fail-after-copy` |
+| A failing cell doesn't take down other cells | `pnpm run chaos set cell-a error` |
+| One tenant can't starve its neighbours | `pnpm run load --scenario noisy-neighbor` |
+| A tenant's data is unreachable to co-tenants | `pnpm test` → `isolation.test.ts` |
+| A live tenant can be moved between cells | `pnpm run migrate --tenant acme --to cell-b` |
+| A failed migration leaves no trace | add `--fail-after-copy` to the above |
+
+📐 **[ARCHITECTURE.md](./ARCHITECTURE.md)** — the design, the trade-offs, and an
+honest table of how this differs from real AWS.
 
 ---
 
-## Quick start
+## Prerequisites
 
-Requires Docker Desktop running, Node 22+, and ~4 GB free RAM.
+| Requirement | Check | If missing |
+|---|---|---|
+| **Docker Desktop, running** | `docker info` | [Install](https://docs.docker.com/desktop/) and launch it. The whale icon must be steady, not animating |
+| **Node 22+** | `node --version` | [nodejs.org](https://nodejs.org) or `nvm install 22` |
+| **pnpm 10+** | `pnpm --version` | `corepack enable && corepack prepare pnpm@latest --activate` |
+| **~4 GB free RAM** | — | LocalStack runs each Lambda as its own container |
+| **~2 GB disk** | `df -h .` | For the LocalStack image and Docker layers |
+
+You do **not** need an AWS account, AWS credentials, or the AWS CLI. Credentials
+are dummy values injected by `tools/with-local-env.sh`.
+
+---
+
+## Run it
+
+Five commands from a clean checkout. Total time: about 5 minutes, most of it the
+first Docker image pull.
 
 ```bash
-npm install
-npm run up          # start LocalStack, wait for health
-npm run smoke       # verify which AWS services this LocalStack tier supports
-npm run bootstrap   # cdk bootstrap (once per LocalStack lifetime)
-npm run deploy      # deploy ControlPlane + 3 cells
-npm run seed        # onboard 9 tenants across the cells
-npm test            # 47 tests, ~3 min
-npm run dash        # http://localhost:4000
+# 1. install dependencies
+pnpm install
+
+# 2. start LocalStack and wait until it is healthy   (~30s first time: image pull)
+pnpm run up
+
+# 3. confirm which AWS services this LocalStack tier supports  (~15s)
+pnpm run smoke
+
+# 4. prepare CDK, then deploy the control plane + 3 cells      (~90s)
+pnpm run bootstrap
+pnpm run deploy
+
+# 5. onboard 9 tenants across the cells                        (~20s)
+pnpm run seed
 ```
 
-`npm run reset` wipes LocalStack and starts clean — needed after a restart, since
-state persistence is a LocalStack Pro feature.
+Expected output from step 5:
+
+```
+tenant placement:
+  acme       standard  -> cell-a
+  globex     standard  -> cell-b
+  ...
+  bigco      premium   -> cell-c
+
+cell occupancy:
+  cell-a   4/5 tenants (pooled)
+  cell-b   4/5 tenants (pooled)
+  cell-c   1/1 tenants (silo)
+```
+
+### Verify it works
+
+```bash
+pnpm test        # 47 tests, ~3 minutes
+```
+
+All 7 files should pass. This is the real acceptance gate — it covers routing,
+tenant isolation, the async path, blast-radius containment, noisy-neighbour
+throttling, and live migration with rollback.
+
+### Watch it
+
+```bash
+pnpm run dash    # → http://localhost:4000
+```
+
+A live cell grid that polls every 2 seconds. Leave it open in one terminal and
+run the exercises below in another.
+
+> **Use `pnpm run <script>`, not `pnpm <script>`.** `pnpm up` is a built-in alias
+> for `pnpm update` and would update your dependencies instead of starting
+> LocalStack. The explicit `run` form always does the right thing.
 
 ---
 
-## Architecture
+## Try it by hand
 
-```
-                    ┌──────────────── CONTROL PLANE (one stack) ─────────────────┐
-                    │  Admin API      tenants · routing · cells · ratelimit tbls │
-                    │  Router         Step Functions migration workflow          │
-                    └────────────────────────────────────────────────────────────┘
-                                        │ pulls telemetry / reads routing
-  client ──► Router (APIGW + Lambda) ───┤
-             x-tenant-id header         │  routing lookup (5s cache) → token
-                                        ▼  bucket → forward to the cell
-   ┌───────── cell-a (pooled) ────────┬───── cell-b (pooled) ─────┬──── cell-c (silo) ────┐
-   │ APIGW → api Lambda               │  identical stack,         │  identical stack,     │
-   │ DynamoDB tasks  (pk=TENANT#id)   │  independently            │  one premium tenant   │
-   │ SQS queue + DLQ → worker Lambda  │  deployable               │                       │
-   │ DynamoDB metrics                 │                           │                       │
-   │ SSM /cells/<id>/fault  ← chaos   │                           │                       │
-   └──────────────────────────────────┴───────────────────────────┴───────────────────────┘
+LocalStack assigns new API Gateway ids on every reset, so grab the current URLs:
+
+```bash
+pnpm run urls                                  # show them
+eval "$(pnpm run --silent urls --export)"      # sets $ROUTER and $ADMIN
 ```
 
-### Design decisions worth knowing
+```bash
+# create a task
+curl -X POST "$ROUTER/v1/tasks" \
+  -H 'content-type: application/json' \
+  -H 'x-tenant-id: acme' \
+  -d '{"kind":"report","payload":{"n":1}}' -i
 
-**Cells are independent CloudFormation stacks.** `infra/lib/cell-stack.ts` is
-instantiated once per entry in `infra/lib/cells.config.ts`. There are no
-CloudFormation exports between cells and no imports from the control plane, so
-`cdklocal deploy Cell-a` provably cannot touch Cell-b. Discovery happens at
-*runtime* through SSM (`packages/shared/cell-directory.ts`) rather than at synth
-time, specifically to preserve that independence.
+# note the x-cell-id header in the response — that's which cell served you
 
-**Routing is an explicit stored mapping, not a hash.** A `hash(tenantId) % N`
-router needs no state, but it makes silo placement impossible and migration
-require rehashing everyone. One row per tenant in `cp-routing` costs a cached
-lookup per request and buys both.
+# list the tenant's tasks
+curl "$ROUTER/v1/tasks?limit=5" -H 'x-tenant-id: acme'
 
-**Tiered ("bridge") isolation.** Standard tenants share a pooled cell's table,
-partitioned by `pk = TENANT#<id>`. Premium tenants get a silo cell to themselves.
-`packages/shared/placement.ts` decides, and refuses to overfill — "deploy another
-cell" is the intended answer to growth, so silently exceeding capacity would erase
-the property being bought.
+# a different tenant cannot see acme's task, even sharing a cell
+curl -o /dev/null -w '%{http_code}\n' \
+  "$ROUTER/v1/tasks/<paste-a-task-id>" -H 'x-tenant-id: globex'   # → 404
 
-**Isolation is enforced in two layers.**
-1. *Structural*: `TaskRepository` (`packages/shared/task-repository.ts`) is
-   constructed from a `TenantContext` and no method takes a tenant id — a handler
-   holding tenant A's repository has no expressible way to read tenant B.
-2. *IAM*: before touching data, the api Lambda re-assumes its role with a session
-   policy scoped by `dynamodb:LeadingKeys` (`tenant-credentials.ts`), so even a
-   hand-built foreign key is denied. **LocalStack's free tier does not reliably
-   evaluate session policies**, so locally this layer is present but not enforced;
-   the generated policy is unit-tested instead.
-
-**Cells own their telemetry.** Metrics live in each cell's own DynamoDB table and
-the control plane *pulls* them when the dashboard asks. Cells never push. A cell
-must not depend on the control plane to serve traffic, and a wedged control plane
-must not become a cross-cell failure.
-
-**The rate limiter is two atomic conditional writes, not read-modify-write.**
-The obvious optimistic-locking version was built first and measurably failed: at
-30 concurrent requests nearly all lost the version race, exhausted their retries,
-and were waved through — a limiter defeated by exactly the burst it exists to stop.
-See the comment block in `packages/shared/rate-limiter.ts`.
-
----
-
-## What's different from real AWS
-
-Everything here is a consequence of the free LocalStack tier or of a laptop.
-Nothing in this list is a property of the architecture.
-
-| Area | This prototype | Real AWS | Why |
-|---|---|---|---|
-| Cell routing | API Gateway + Lambda router | Route 53 latency/weighted records, or ALB, or CloudFront + Lambda@Edge | ALB and Route 53 hosted zones are not in the free tier |
-| Cell entry | API Gateway **REST (v1)** | HTTP API (v2) — cheaper, faster | `apigatewayv2` is Pro-only; `npm run smoke` confirms this every run |
-| Compute | Lambda only | ECS/Fargate for long-lived services is often the better cell shape | No ECS in the free tier |
-| Relational data | DynamoDB only | RDS/Aurora per cell is common for silo tenants | No RDS in the free tier |
-| Identity | `x-tenant-id` header, trusted from the router | Cognito / OIDC + a Lambda authorizer producing verified claims | No Cognito in the free tier. **The header is unauthenticated — this is a prototype, not a security model** |
-| IAM enforcement | Session policies generated but not enforced | Actually enforced | Free-tier limitation; try `ENFORCE_IAM=1` in `docker-compose.yml` |
-| Concurrency | ~12 concurrent requests max | Effectively unbounded | LocalStack runs **one Docker container per Lambda invocation**. A 25-wide burst reproducibly wedges it. See `packages/shared/concurrency.ts` |
-| Rate limits | standard 2 rps / premium 50 rps | hundreds to thousands | A realistic limit could never be reached locally, making throttling unobservable |
-| Regions | Single region | Cells usually span AZs, sometimes regions | Single LocalStack instance |
-| State | Lost on restart | Durable | Persistence is a Pro feature; `npm run reset` re-creates everything |
-
-**Portability.** Every AWS client reads `AWS_ENDPOINT_URL` from one place
-(`packages/shared/aws.ts`) and omits it when unset. `tools/with-local-env.sh` is the
-only thing that sets it. Drop that wrapper and `cdk deploy` targets a real account —
-though you would want to revisit the routing layer and rate limits first.
-
----
-
-## Repository layout
-
+# no tenant header at all
+curl -o /dev/null -w '%{http_code}\n' "$ROUTER/v1/tasks"          # → 401
 ```
-infra/
-  bin/app.ts                 CDK app: ControlPlaneStack + CellStack × N
-  lib/cells.config.ts        the cell inventory — the only place cell count lives
-  lib/cell-stack.ts          one cell: API, compute, table, queue, metrics, chaos knob
-  lib/control-plane-stack.ts routing/tenant/cell tables, router, admin API, migration SFN
-packages/
-  shared/                    tenant context, scoped repository, placement, limiter,
-                             faults, metrics, cell directory, concurrency guardrail
-  services/
-    router/                  routing lookup + throttle + forward (proxy | redirect)
-    api/                     cell data plane: create / get / list tasks
-    worker/                  SQS consumer with partial-batch failure reporting
-    admin/                   onboarding, cell sync, migration control, overview
-    migration/               the seven migration steps + rollback
-tools/                       smoke, seed, chaos, loadgen, migrate, dashboard server
-test/unit/                   placement, tenant context, session policy
-test/integration/            routing, isolation, async, blast radius, noisy neighbour, migration
-dashboard/index.html         2s-polling live view
-```
+
+`content-type: application/json` matters — without it curl sends form-encoded
+and you'll get a `400`.
 
 ---
 
 ## Exercises
 
-Run `npm run dash` in one terminal and work through these in another.
+Run `pnpm run dash` in one terminal, these in another.
 
-**1. Blast radius.** `npm run chaos -- set cell-a error`, then
-`npm run load -- --scenario baseline --duration 20`. The report's failures-by-cell
-line should name only cell-a. `npm run chaos -- clear-all` when done.
+**1. Blast radius.** Break one cell and confirm the others don't care.
+```bash
+pnpm run chaos set cell-a error
+pnpm run load --scenario baseline --duration 20 --keep-faults
+pnpm run chaos clear-all
+```
+```
+BY CELL        sent     ok    429   fail
+cell-a           34      0      0     34     ← every request fails
+cell-b           34     34      0      0     ← untouched
+cell-c           51     51      0      0     ← untouched
 
-**2. Latency containment.** `npm run chaos -- set cell-b latency`. Only cell-b's
-p95 moves. This is the failure mode that leaks across a shared thread pool but
-cannot cross a cell boundary.
+failures by cell: cell-a=34
+```
+`--keep-faults` matters: without it the load generator clears faults at startup
+so a stale one can't skew results, and your deliberate fault would go with it.
+(`--scenario cell-failure` injects its own fault mid-run and needs no flag.)
 
-**3. Noisy neighbour.** `npm run load -- --scenario noisy-neighbor`. One tenant
-absorbs its own 429s while its *co-tenant in the same cell* stays clean.
+**2. Latency containment.** Slowness, not failure — the mode that leaks across a
+shared thread pool but cannot cross a cell boundary.
+```bash
+pnpm run chaos set cell-b latency
+pnpm run load --scenario baseline --duration 15 --keep-faults
+pnpm run chaos clear-all
+```
+Only cell-b's p95 moves (~2.5s vs ~1s elsewhere), and nothing errors.
 
-**4. Live migration.** `npm run migrate -- --tenant acme --to cell-b` while the
-baseline load is running. Watch the tenant move on the dashboard; reads never stop.
+**3. Noisy neighbour.** `pnpm run load --scenario noisy-neighbor`. One tenant
+absorbs its own 429s while its **co-tenant in the same cell** stays clean.
 
-**5. Rollback.** `npm run migrate -- --tenant acme --to cell-a --fail-after-copy`.
+**4. Live migration.** With a baseline load running, `pnpm run migrate --tenant
+acme --to cell-b`. Watch the tenant move on the dashboard; reads never stop.
+
+**5. Rollback.** `pnpm run migrate --tenant acme --to cell-a --fail-after-copy`.
 The tenant stays put and the partial copy is deleted.
 
-**6. Capacity exhaustion.** `npm run tenant -- add newco --tier premium`.
-The silo cell holds exactly one tenant, so this fails with `507 no_capacity` and a
-message telling you to deploy another cell. That refusal is the design working:
-overfilling a cell would silently erase the isolation the tier was sold on.
-`npm run tenant -- list` shows occupancy per cell.
+**6. Capacity exhaustion.** `pnpm run tenant add newco --tier premium`. The silo
+cell holds exactly one tenant, so this fails with `507 no_capacity` telling you
+to deploy another cell. That refusal *is* the design — overfilling would erase
+the isolation the tier was sold on.
 
-**7. Add a cell.** Add `{ id: 'cell-d', tier: 'pooled', capacity: 5, reservedConcurrency: 6 }`
-to `infra/lib/cells.config.ts`, then `npm run deploy && npm run seed`. Note that no
-existing cell is modified and no tenant moves.
+**7. Add a cell.** Append to `infra/lib/cells.config.ts`:
+```ts
+{ id: 'cell-d', tier: 'pooled', capacity: 5, reservedConcurrency: 6 },
+```
+then `pnpm run deploy && pnpm run seed`. Note that no existing cell is modified
+and no tenant moves.
 
 ---
 
@@ -186,39 +190,80 @@ existing cell is modified and no tenant moves.
 
 | Command | What it does |
 |---|---|
-| `npm run up` / `down` / `reset` | LocalStack lifecycle |
-| `npm run smoke` | Verify AWS service coverage on this tier |
-| `npm run deploy` | Deploy all stacks |
-| `npm run deploy:cell -- Cell-a` | Deploy one cell (the fast inner loop) |
-| `npm run seed` | Onboard tenants; also reconciles tier rate limits |
-| `npm run tenant -- list \| add <id> [--tier premium] \| show <id>` | Inspect and onboard tenants |
-| `npm test` | Full suite (47 tests, ~3 min) |
-| `npm run test:slow` | SQS redrive to DLQ (~3.5 min — see below) |
-| `npm run chaos -- status \| set <cell> <mode> \| clear-all` | Fault injection |
-| `npm run load -- --scenario <name> --duration <s>` | baseline · noisy-neighbor · cell-failure |
-| `npm run migrate -- --tenant <id> --to <cell> [--fail-after-copy]` | Move a tenant |
-| `npm run dash` | Dashboard on :4000 |
+| `pnpm run up` / `down` / `reset` | LocalStack lifecycle (`reset` wipes all state) |
+| `pnpm run smoke` | Verify AWS service coverage on this LocalStack tier |
+| `pnpm run bootstrap` | CDK bootstrap — once per LocalStack lifetime |
+| `pnpm run deploy` | Deploy all 4 stacks |
+| `pnpm run deploy:cell Cell-a` | Deploy one stack — the fast inner loop |
+| `pnpm run seed` | Onboard tenants; also reconciles tier rate limits |
+| `pnpm run urls [--export]` | Print router / admin / cell endpoints |
+| `pnpm run tenant list \| add <id> [--tier premium] \| show <id>` | Inspect and onboard tenants |
+| `pnpm test` | Full suite (47 tests, ~3 min) |
+| `pnpm run test:slow` | SQS redrive to DLQ (~3.5 min, opt-in — see below) |
+| `pnpm run typecheck` | `tsc --noEmit` |
+| `pnpm run chaos status \| set <cell> <mode> \| clear <cell> \| clear-all` | Fault injection |
+| `pnpm run load --scenario <name> --duration <s> [--keep-faults]` | `baseline` · `noisy-neighbor` · `cell-failure` |
+| `pnpm run migrate --tenant <id> --to <cell> [--fail-after-copy]` | Move a tenant |
+| `pnpm run dash` | Dashboard on :4000 |
 
 Fault modes: `none`, `latency` (+1.5s), `error` (5xx), `blackhole` (hangs).
 
 ---
 
-## Notes on the tests
+## Troubleshooting
 
-47 tests run in about three minutes. They run **single-forked and serially** —
+**`Cannot connect to the Docker daemon`** — Docker Desktop isn't running. Start it
+and wait for the whale icon to stop animating.
+
+**LocalStack stops responding mid-run; `curl localhost:4566` hangs.** You
+overloaded it. LocalStack runs one Docker container per Lambda invocation, and a
+burst above ~25 wedges the whole instance. Recover with:
+```bash
+docker compose down
+docker ps -aq --filter "name=localstack-" | xargs -r docker rm -f
+pnpm run reset
+pnpm run bootstrap && pnpm run deploy && pnpm run seed
+```
+To avoid it, keep client fan-out under `LOCAL_SAFE_CONCURRENCY` (default 8) — the
+tools already do this; see `packages/shared/concurrency.ts`.
+
+**Everything 404s / `SSM parameter is empty` after restarting your machine.**
+LocalStack state does not persist (that's a Pro feature). Re-run:
+```bash
+pnpm run up && pnpm run bootstrap && pnpm run deploy && pnpm run seed
+```
+
+**`pnpm up` updated my dependencies.** That's pnpm's built-in `update` alias.
+Use `pnpm run up`. (`git checkout pnpm-lock.yaml && pnpm install` to undo.)
+
+**`EnvironmentMisconfigurationError: AWS_ENDPOINT_URL_S3 must be specified`** —
+you invoked `cdklocal` directly instead of through a script. Use `pnpm run deploy`,
+or wrap it: `bash tools/with-local-env.sh cdklocal <cmd>`.
+
+**A test fails on a fresh clone but passes on retry.** Some tests are
+timing-sensitive against a loaded emulator. If a specific test fails repeatedly,
+that's real — open the file, the assertions document what they expect and why.
+
+**Tests are slow.** Expected. They run single-forked and serially on purpose:
 LocalStack's one-container-per-invocation model turns test parallelism directly
 into container concurrency, and a parallel suite wedges the emulator.
 
-`test/integration/dlq.slow.test.ts` is excluded from `npm test`. Redrive to the DLQ
-takes ~209 seconds (measured): three redeliveries at a 35s visibility timeout plus
-LocalStack's own SQS poller backoff. The behaviour matters — without a DLQ a poison
-message is redelivered forever and permanently consumes part of a cell's worker
-capacity — so it is kept as an opt-in `npm run test:slow` rather than deleted or
-weakened.
+---
 
-Two bugs found by these tests, both left documented in the code because the failure
-modes are instructive:
-- the rate limiter's original read-modify-write design, which failed open under
-  exactly the load it was meant to shed;
-- migration rollback restoring routing but leaving 191 orphaned rows in the target
-  cell, because the cleanup was gated on a field the rollback payload didn't carry.
+## Notes
+
+**Package manager.** pnpm, with `node-linker=hoisted` in `.npmrc`. CDK's
+`NodejsFunction` shells out to esbuild and resolves `aws-cdk-lib`'s transitive
+deps at synth time, which pnpm's default symlinked layout hides. Hoisting keeps
+the CDK toolchain working exactly as it does under npm.
+
+**The slow test.** `test/integration/dlq.slow.test.ts` is excluded from
+`pnpm test`. Redrive to the DLQ takes ~209 seconds (measured): three
+redeliveries at a 35s visibility timeout plus LocalStack's own SQS poller
+backoff. The behaviour matters — without a DLQ a poison message is redelivered
+forever and permanently consumes part of a cell's worker capacity — so it's kept
+as opt-in rather than deleted or weakened.
+
+**Security.** The `x-tenant-id` header is unauthenticated. On real AWS that would
+be a Cognito/OIDC Lambda authorizer producing verified claims. This is a
+prototype for studying architecture, not a security model.

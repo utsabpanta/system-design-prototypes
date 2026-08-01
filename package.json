@@ -3,10 +3,15 @@
   "version": "0.1.0",
   "private": true,
   "description": "Cell-based multi-tenant architecture prototype running on LocalStack",
+  "packageManager": "pnpm@10.15.1",
+  "engines": {
+    "node": ">=22",
+    "pnpm": ">=10"
+  },
   "scripts": {
     "up": "docker compose up -d && bash tools/wait-for-localstack.sh",
     "down": "docker compose down",
-    "reset": "docker compose down -v && rm -rf .localstack cdk.out && npm run up",
+    "reset": "docker compose down -v && rm -rf .localstack cdk.out && pnpm run up",
     "smoke": "bash tools/smoke.sh",
     "synth": "bash tools/with-local-env.sh cdklocal synth --quiet",
     "bootstrap": "bash tools/with-local-env.sh cdklocal bootstrap",
@@ -14,6 +19,7 @@
     "deploy:cell": "bash tools/with-local-env.sh cdklocal deploy --require-approval never",
     "destroy": "bash tools/with-local-env.sh cdklocal destroy --all --force",
     "seed": "bash tools/with-local-env.sh tsx tools/seed.ts",
+    "urls": "bash tools/with-local-env.sh tsx tools/urls.ts",
     "tenant": "bash tools/with-local-env.sh tsx tools/tenant.ts",
     "chaos": "bash tools/with-local-env.sh tsx tools/chaos.ts",
     "load": "bash tools/with-local-env.sh tsx tools/loadgen.ts",

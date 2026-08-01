@@ -9,7 +9,7 @@
  * forever and permanently consumes a slice of the cell's worker capacity,
  * which is a slow-motion cell outage caused by one bad message.
  *
- * Run with: npm run test:slow
+ * Run with: pnpm run test:slow
  */
 import { describe, expect, it } from 'vitest';
 import { GetQueueAttributesCommand, SendMessageCommand } from '@aws-sdk/client-sqs';

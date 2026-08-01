@@ -15,7 +15,15 @@
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { mapLimit, rapidSerial } from '../../packages/shared/concurrency.js';
-import { call, cellOf, clearAllFaults, router, sleep, tenantHeaders } from '../helpers.js';
+import {
+  callRaw,
+  cellOf,
+  clearAllFaults,
+  router,
+  sleep,
+  STANDARD_TENANT_GAP_MS,
+  tenantHeaders,
+} from '../helpers.js';
 
 interface ProbeResult {
   status: number;
@@ -25,7 +33,7 @@ interface ProbeResult {
 
 async function probe(tenantId: string): Promise<ProbeResult> {
   const startedAt = Date.now();
-  const res = await call(`${await router()}/v1/tasks?limit=1`, {
+  const res = await callRaw(`${await router()}/v1/tasks?limit=1`, {
     headers: tenantHeaders(tenantId),
   });
   return {
@@ -102,11 +110,12 @@ describe('noisy neighbour containment', () => {
   it('leaves a co-tenant in the same cell unharmed during the abuse', async () => {
     const flood = rapidSerial(40, () => probe(abuser));
 
-    // The victim keeps to its own budget while the abuser floods the cell.
+    // The victim must stay strictly inside its own budget, or it throttles
+    // itself and the test blames the neighbour for it.
     const victimResults: ProbeResult[] = [];
     for (let i = 0; i < 6; i++) {
       victimResults.push(await probe(victim));
-      await sleep(250);
+      await sleep(STANDARD_TENANT_GAP_MS);
     }
     await flood;
 

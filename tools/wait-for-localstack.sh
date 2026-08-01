@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Block until LocalStack's edge port answers healthy, so `npm run up` is
+# Block until LocalStack's edge port answers healthy, so `pnpm run up` is
 # safe to chain straight into deploy/seed.
 set -euo pipefail
 

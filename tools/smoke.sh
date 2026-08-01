@@ -45,7 +45,7 @@ echo "LocalStack service coverage check against $ENDPOINT"
 echo
 
 if ! curl -sf "$ENDPOINT/_localstack/health" >/dev/null; then
-  echo "LocalStack is not reachable at $ENDPOINT. Run: npm run up"
+  echo "LocalStack is not reachable at $ENDPOINT. Run: pnpm run up"
   exit 1
 fi
 

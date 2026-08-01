@@ -40,13 +40,23 @@ describe('async processing', () => {
   });
 
   it('marks a task failed rather than losing it when processing throws', async () => {
-    const cell = await getCell('cell-a', true);
-    expect(cell).toBeDefined();
-
-    // A task row with no matching queue message would just sit at "queued";
-    // here the worker receives a message it cannot process and must record
-    // the failure against the task instead of silently dropping it.
+    // Create the task and let its legitimate message finish first. Enqueuing
+    // the poison message alongside the real one races two workers against the
+    // same row, and whichever lands last wins — that flakiness is the test's,
+    // not the system's.
     const created = await createTask('acme', { kind: 'will-fail' });
+    await until(
+      () => getTask('acme', created.task.taskId),
+      (res) => (res.body as Task)?.status === 'completed',
+      { timeoutMs: 45_000 },
+    );
+
+    // Resolve the tenant's *current* cell rather than assuming one: migration
+    // tests move tenants around, and a hardcoded cell id sends the poison
+    // message to a queue whose table does not hold this task.
+    const cell = await getCell(created.cellId!, true);
+    expect(cell, `no config for cell ${created.cellId}`).toBeDefined();
+
     await sqsClient().send(
       new SendMessageCommand({
         QueueUrl: cell!.queueUrl,
@@ -58,6 +68,9 @@ describe('async processing', () => {
       }),
     );
 
+    // The worker must record the failure against the task rather than dropping
+    // it silently — a task stuck at "completed" after a failed reprocess would
+    // hide the error from the tenant entirely.
     const final = await until(
       () => getTask('acme', created.task.taskId),
       (res) => (res.body as Task)?.status === 'failed',

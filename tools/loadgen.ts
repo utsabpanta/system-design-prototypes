@@ -7,14 +7,19 @@
  * failures were contained. A single aggregate number would hide exactly the
  * behaviour worth looking at.
  *
- *   npm run load                              # baseline
- *   npm run load -- --scenario noisy-neighbor
- *   npm run load -- --scenario cell-failure
- *   npm run load -- --scenario baseline --duration 30
+ *   pnpm run load                                          # baseline
+ *   pnpm run load --scenario noisy-neighbor
+ *   pnpm run load --scenario cell-failure                  # injects its own fault
+ *   pnpm run load --scenario baseline --duration 30
+ *   pnpm run load --keep-faults                            # honour `chaos set`
  */
-import { PutParameterCommand } from '@aws-sdk/client-ssm';
+import { GetParameterCommand, PutParameterCommand } from '@aws-sdk/client-ssm';
 import { ssmClient } from '../packages/shared/aws.js';
 import { LOCAL_SAFE_CONCURRENCY } from '../packages/shared/concurrency.js';
+import { listCells } from '../packages/shared/cell-directory.js';
+import { routerEndpoint } from '../packages/shared/endpoints.js';
+import { faultParameterName } from '../packages/shared/faults.js';
+import type { FaultMode } from '../packages/shared/types.js';
 
 /**
  * The generator may run hotter than the default guardrail: it spreads work
@@ -25,10 +30,6 @@ import { LOCAL_SAFE_CONCURRENCY } from '../packages/shared/concurrency.js';
 const LOADGEN_CONCURRENCY = Number(
   process.env.LOADGEN_CONCURRENCY ?? LOCAL_SAFE_CONCURRENCY + 4,
 );
-import { listCells } from '../packages/shared/cell-directory.js';
-import { routerEndpoint } from '../packages/shared/endpoints.js';
-import { faultParameterName } from '../packages/shared/faults.js';
-import type { FaultMode } from '../packages/shared/types.js';
 
 interface TenantLoad {
   tenantId: string;
@@ -74,6 +75,17 @@ async function setFault(cellId: string, mode: FaultMode): Promise<void> {
   );
 }
 
+async function readFault(cellId: string): Promise<FaultMode> {
+  try {
+    const res = await ssmClient().send(
+      new GetParameterCommand({ Name: faultParameterName(cellId) }),
+    );
+    return (res.Parameter?.Value as FaultMode) ?? 'none';
+  } catch {
+    return 'none';
+  }
+}
+
 function buildScenarios(victimCell: string): Record<string, Scenario> {
   return {
     baseline: {
@@ -85,7 +97,7 @@ function buildScenarios(victimCell: string): Record<string, Scenario> {
       name: 'noisy-neighbor',
       description: 'one tenant floods at 10x budget; co-tenants should not notice',
       tenants: [
-        { tenantId: 'acme', rps: 50 }, // way past the standard 5 rps
+        { tenantId: 'acme', rps: 50 }, // far past the standard tier's 2 rps
         ...STANDARD.filter((t) => t.tenantId !== 'acme'),
         { tenantId: 'bigco', rps: 3 },
       ],
@@ -117,6 +129,7 @@ function percentile(values: number[], p: number): number {
 async function main(): Promise<void> {
   const durationSec = Number(arg('duration', '20'));
   const scenarioName = arg('scenario', 'baseline');
+  const keepFaults = process.argv.includes('--keep-faults');
 
   const cells = await listCells(true);
   const victimCell = cells.find((c) => c.tier === 'pooled')?.cellId ?? 'cell-a';
@@ -134,8 +147,32 @@ async function main(): Promise<void> {
     `offered    ${scenario.tenants.map((t) => `${t.tenantId}@${t.rps}rps`).join(', ')}\n`,
   );
 
-  // Faults from a previous run would silently poison the results.
-  for (const c of cells) await setFault(c.cellId, 'none');
+  // Leftover faults from a previous run would silently poison the results, so
+  // the default is to clear them. But an operator who just ran `chaos set` and
+  // then a load test means for that fault to be in effect — silently undoing it
+  // made the documented blast-radius exercise report a clean run. Clearing is
+  // therefore announced, and --keep-faults opts out.
+  const preExisting = await Promise.all(
+    cells.map(async (c) => ({ cellId: c.cellId, fault: await readFault(c.cellId) })),
+  );
+  const faulted = preExisting.filter((c) => c.fault !== 'none');
+
+  if (keepFaults) {
+    console.log(
+      faulted.length
+        ? `keeping pre-existing faults: ${faulted.map((c) => `${c.cellId}=${c.fault}`).join(', ')}\n`
+        : 'no pre-existing faults to keep\n',
+    );
+  } else {
+    if (faulted.length) {
+      console.log(
+        `clearing pre-existing faults (${faulted
+          .map((c) => `${c.cellId}=${c.fault}`)
+          .join(', ')}) — pass --keep-faults to preserve them\n`,
+      );
+    }
+    for (const c of cells) await setFault(c.cellId, 'none');
+  }
   await new Promise((r) => setTimeout(r, 2500));
 
   const samples: Sample[] = [];
@@ -236,8 +273,14 @@ async function main(): Promise<void> {
 
   report(samples, shed, durationSec, caps);
 
-  for (const c of cells) await setFault(c.cellId, 'none');
-  console.log('\nfaults cleared.');
+  // --keep-faults leaves the cells exactly as the operator set them, so a
+  // chaos state can outlive the run and be inspected on the dashboard.
+  if (keepFaults) {
+    console.log('\nfaults left in place (--keep-faults). Clear with: pnpm run chaos clear-all');
+  } else {
+    for (const c of cells) await setFault(c.cellId, 'none');
+    console.log('\nfaults cleared.');
+  }
 }
 
 function report(

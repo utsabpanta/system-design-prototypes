@@ -2,11 +2,45 @@
 import { PutParameterCommand } from '@aws-sdk/client-ssm';
 import { ssmClient } from '../packages/shared/aws.js';
 import { getCell, invalidateCellCache, listCells } from '../packages/shared/cell-directory.js';
-import { adminEndpoint, call, routerEndpoint } from '../packages/shared/endpoints.js';
+import {
+  adminEndpoint,
+  call as callRaw,
+  routerEndpoint,
+  type ApiCallOptions,
+  type ApiResponse,
+} from '../packages/shared/endpoints.js';
 import { FAULT_CACHE_TTL_MS, faultParameterName } from '../packages/shared/faults.js';
+import { defaultRateLimit } from '../packages/shared/placement.js';
 import type { FaultMode, Task } from '../packages/shared/types.js';
 
-export { call, getCell, listCells, invalidateCellCache };
+export { callRaw, getCell, listCells, invalidateCellCache };
+
+/**
+ * The default test client: identical to `callRaw`, except it waits out a 429
+ * and retries.
+ *
+ * Rate limits here are deliberately tiny (2 rps for a standard tenant) so that
+ * throttling is observable on a laptop. The side effect is that any test making
+ * a few requests as one tenant trips the limiter — and then reports a
+ * *throttle* as though it were an isolation or routing failure. That happened
+ * twice while building this. Tests about semantics should not have to encode
+ * the limiter's timing; they honour Retry-After and move on.
+ *
+ * Suites that are *about* the limiter must use `callRaw` to see the raw 429.
+ */
+export async function call<T = unknown>(
+  url: string,
+  opts: ApiCallOptions = {},
+  attempts = 3,
+): Promise<ApiResponse<T>> {
+  let res = await callRaw<T>(url, opts);
+  for (let i = 1; i < attempts && res.status === 429; i++) {
+    const retryAfter = Number(res.headers.get('retry-after') ?? 1);
+    await sleep(Math.max(250, retryAfter * 1000));
+    res = await callRaw<T>(url, opts);
+  }
+  return res;
+}
 
 let routerUrlCache: string | undefined;
 let adminUrlCache: string | undefined;
@@ -103,12 +137,15 @@ export async function until<T>(
 }
 
 /**
- * Rate limits are per tenant and deliberately tight, so tests that only need
- * "a request happened" should pace themselves rather than fight the limiter.
+ * Gap a test must leave between two requests *from the same standard tenant*
+ * to stay inside its budget.
+ *
+ * Derived from the real tier limit rather than hardcoded, because it silently
+ * drifted once already: the pacing was written against a 5 rps budget, the tier
+ * was later lowered to 2 rps, and a "victim" tenant started throttling itself —
+ * which looked exactly like the noisy neighbour harming it.
+ *
+ * Probing several *different* tenants back to back needs no gap; buckets are
+ * per tenant.
  */
-export async function paced<T>(items: T[], fn: (item: T) => Promise<void>): Promise<void> {
-  for (const item of items) {
-    await fn(item);
-    await sleep(210); // ~4.7 rps, just under the standard tier's 5
-  }
-}
+export const STANDARD_TENANT_GAP_MS = Math.ceil(1000 / defaultRateLimit('standard').rps) + 200;
