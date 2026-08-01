@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A superseded run tells you nothing useful and holds a runner for ~10 minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Deploy to LocalStack and run the suite
+    runs-on: ubuntu-latest
+    # The suite alone is ~4 min; deploy adds ~2. The cap is a hang-breaker, not
+    # a target — LocalStack wedging under load presents as an indefinite stall.
+    timeout-minutes: 25
+
+    env:
+      # LocalStack runs one Docker container per Lambda invocation, so client
+      # fan-out has to fit the runner. Lower than the local default of 8
+      # because a hosted runner has fewer cores than the machine this was
+      # built on, and an overloaded LocalStack stalls rather than erroring.
+      LOCAL_SAFE_CONCURRENCY: 4
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Cheap checks first: no point paying for a LocalStack deploy to discover
+      # the code does not compile.
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      - name: Unit tests
+        run: pnpm exec vitest run test/unit
+
+      # smoke.sh drives the *host* aws CLI. GitHub's Ubuntu image ships it, but
+      # asserting that here turns a future image change into one clear line
+      # instead of 25 "command not found" failures.
+      - name: Check runner prerequisites
+        run: |
+          command -v aws >/dev/null || {
+            echo "::error::aws CLI missing from the runner image; tools/smoke.sh needs it"
+            exit 1
+          }
+          aws --version
+          docker compose version
+
+      - name: Start LocalStack
+        run: pnpm run up
+
+      # Guards the whole run: if this LocalStack build dropped a service the
+      # design needs, every later failure would be a confusing symptom of it.
+      - name: Verify AWS service coverage
+        run: pnpm run smoke
+
+      - name: Bootstrap CDK
+        run: pnpm run bootstrap
+
+      - name: Deploy control plane and cells
+        run: pnpm run deploy
+
+      - name: Seed tenants
+        run: pnpm run seed
+
+      - name: Integration tests
+        run: pnpm test
+
+      # Without this a CI-only failure is nearly undebuggable: the interesting
+      # evidence lives in the container, which is gone once the job ends.
+      - name: LocalStack logs
+        if: failure()
+        run: |
+          echo "::group::localstack"
+          docker compose logs --tail 300 localstack || true
+          echo "::endgroup::"
+          echo "::group::lambda containers"
+          docker ps -a --filter "name=localstack-" \
+            --format '{{.Names}}\t{{.Status}}' || true
+          echo "::endgroup::"
+          echo "::group::deployed stacks"
+          docker exec sdp-localstack awslocal cloudformation list-stacks \
+            --query 'StackSummaries[].{name:StackName,status:StackStatus}' \
+            --output table || true
+          echo "::endgroup::"
+
+      - name: Stop LocalStack
+        if: always()
+        run: docker compose down -v || true

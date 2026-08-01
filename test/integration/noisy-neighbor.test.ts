@@ -98,7 +98,11 @@ describe('noisy neighbour containment', () => {
     // a full 10 seconds the budget could not exceed 25, so some must be shed.
     // Sizing it this way keeps the assertion deterministic rather than racing
     // the refill clock.
-    const results = await mapLimit(Array.from({ length: 48 }), () => probe(abuser), 8);
+    // Fan-out comes from LOCAL_SAFE_CONCURRENCY (mapLimit's default) rather
+    // than a literal, so CI can dial it down for a smaller runner. Hardcoding
+    // it here would silently ignore that setting — which is exactly what the
+    // env var exists to prevent.
+    const results = await mapLimit(Array.from({ length: 48 }), () => probe(abuser));
     const statuses = results.map((r) => (r instanceof Error ? 0 : r.status));
 
     expect(statuses.filter((s) => s === 200).length).toBeGreaterThan(0);

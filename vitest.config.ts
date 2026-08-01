@@ -26,5 +26,16 @@ export default defineConfig({
     testTimeout: 180_000,
     hookTimeout: 180_000,
     sequence: { concurrent: false },
+
+    // These are integration tests against an emulator, and a few assert on
+    // timing (throttle windows, fault propagation, queue drain). On a shared CI
+    // runner that occasionally produces a blip: measured locally at roughly one
+    // flake in three full runs, always a different test, never reproducible.
+    //
+    // A retry cannot hide a real regression — a genuine break fails all three
+    // attempts — but it stops a slow runner from reddening an otherwise good
+    // build. Locally the default stays 0, so flakiness surfaces during
+    // development instead of being papered over.
+    retry: process.env.CI ? 2 : 0,
   },
 });

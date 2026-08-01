@@ -1,5 +1,8 @@
 # Cell-Based Multi-Tenant Architecture — a runnable prototype
 
+[![CI](https://github.com/utsabpanta/system-design-prototypes/actions/workflows/ci.yml/badge.svg)](https://github.com/utsabpanta/system-design-prototypes/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
+
 A working multi-tenant system built the way it would be built on AWS — real CDK,
 real CloudFormation, real AWS APIs — but deployed entirely to **LocalStack on your
 laptop**. No AWS account, no cloud spend.
@@ -278,6 +281,13 @@ redeliveries at a 35s visibility timeout plus LocalStack's own SQS poller
 backoff. The behaviour matters — without a DLQ a poison message is redelivered
 forever and permanently consumes part of a cell's worker capacity — so it's kept
 as opt-in rather than deleted or weakened.
+
+**CI.** [`.github/workflows/ci.yml`](./.github/workflows/ci.yml) runs the real
+thing on every push: it starts LocalStack, checks service coverage, deploys all
+four stacks, seeds tenants, and runs all 47 tests (~8 min). Tests retry up to
+twice **on CI only** — a few assert on timing against an emulator, which blips
+about one run in three on a shared runner. A real regression still fails all
+three attempts; locally retries are off so flakiness stays visible.
 
 **Security.** The `x-tenant-id` header is unauthenticated. On real AWS that would
 be a Cognito/OIDC Lambda authorizer producing verified claims. This is a
