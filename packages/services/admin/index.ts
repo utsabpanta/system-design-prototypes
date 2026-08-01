@@ -200,6 +200,17 @@ async function overview(): Promise<Record<string, unknown>> {
     tenantsByCell.set(r.cellId, [...(tenantsByCell.get(r.cellId) ?? []), r]);
   }
 
+  // Router metrics are read first because throttles are only visible here.
+  // The router rejects an over-budget request *before* calling the cell, so a
+  // cell literally cannot observe its own 429s — its throttle counter is
+  // always 0. Reporting that as the cell's 429 count made a real signal
+  // (28 throttles) render as zeroes on the dashboard. Throttles belong to a
+  // tenant, and a tenant belongs to a cell, so they are attributed that way.
+  const routerMetrics = await readMetrics(CP_METRICS_TABLE, 'router').catch(() => null);
+  const throttlesByTenant = new Map<string, number>(
+    Object.entries(routerMetrics?.byTenant ?? {}).map(([t, v]) => [t, v.throttled]),
+  );
+
   const cellViews = await Promise.all(
     cells.map(async (cell) => {
       const [fault, metrics, queue] = await Promise.all([
@@ -207,28 +218,44 @@ async function overview(): Promise<Record<string, unknown>> {
         readCellMetrics(cell).catch(() => null),
         readQueueDepth(cell.queueUrl).catch(() => null),
       ]);
+
+      const cellTenants = (tenantsByCell.get(cell.cellId) ?? [])
+        .map((r) => ({
+          tenantId: r.tenantId,
+          tier: r.tier,
+          status: r.status,
+          rateLimit: r.rateLimit,
+          requests: metrics?.byTenant?.[r.tenantId]?.requests ?? 0,
+          errors: metrics?.byTenant?.[r.tenantId]?.errors ?? 0,
+          throttled: throttlesByTenant.get(r.tenantId) ?? 0,
+        }))
+        .sort((a, b) => a.tenantId.localeCompare(b.tenantId));
+
+      const throttled = cellTenants.reduce((n, t) => n + t.throttled, 0);
+      const health = cellHealth({
+        fault,
+        requests: metrics?.requests ?? 0,
+        errors: metrics?.errors ?? 0,
+        throttled,
+        dlq: queue?.dlq ?? 0,
+        reachable: metrics !== null,
+      });
+
       return {
         cellId: cell.cellId,
         tier: cell.tier,
         capacity: cell.capacity,
         endpoint: cell.endpoint,
         fault,
-        healthy: fault === 'none',
+        ...health,
         queue,
-        metrics,
-        tenants: (tenantsByCell.get(cell.cellId) ?? [])
-          .map((r) => ({
-            tenantId: r.tenantId,
-            tier: r.tier,
-            status: r.status,
-            rateLimit: r.rateLimit,
-          }))
-          .sort((a, b) => a.tenantId.localeCompare(b.tenantId)),
+        // `throttled` is overwritten with the router-attributed figure; the
+        // cell's own counter is structurally zero and would mislead.
+        metrics: metrics ? { ...metrics, throttled } : null,
+        tenants: cellTenants,
       };
     }),
   );
-
-  const routerMetrics = await readMetrics(CP_METRICS_TABLE, 'router').catch(() => null);
 
   return {
     generatedAt: new Date().toISOString(),
@@ -238,9 +265,65 @@ async function overview(): Promise<Record<string, unknown>> {
       cells: cells.length,
       tenants: tenants.length,
       migrating: routes.filter((r) => r.status === 'READ_ONLY').length,
-      unhealthyCells: cellViews.filter((c) => !c.healthy).length,
+      // Derived from the same cellHealth() verdict the cards colour themselves
+      // with, so the header count and the grid can never disagree.
+      unhealthyCells: cellViews.filter((c) => c.severity === 'down').length,
+      degradedCells: cellViews.filter((c) => c.severity === 'degraded').length,
     },
   };
+}
+
+export type CellSeverity = 'ok' | 'warning' | 'degraded' | 'down';
+
+const ERROR_RATE_THRESHOLD = 0.05;
+
+/**
+ * The single health verdict for a cell.
+ *
+ * There used to be three competing definitions: the card's border colour keyed
+ * off error rate and DLQ depth, the badge text keyed off the injected fault
+ * alone, and the header's "unhealthy" count off the fault too. So a cell could
+ * render bright red, label itself "healthy", and not be counted as unhealthy —
+ * all at once, which is exactly what the screenshot showed.
+ *
+ * Deciding it once, server-side, makes that class of disagreement impossible.
+ * `reason` exists so the UI can say *why* rather than just showing a colour.
+ */
+function cellHealth(input: {
+  fault: FaultMode;
+  requests: number;
+  errors: number;
+  throttled: number;
+  dlq: number;
+  reachable: boolean;
+}): { healthy: boolean; severity: CellSeverity; reason: string } {
+  if (!input.reachable) {
+    return { healthy: false, severity: 'down', reason: 'unreachable' };
+  }
+  if (input.fault !== 'none') {
+    return { healthy: false, severity: 'down', reason: `fault: ${input.fault}` };
+  }
+
+  const errorRate = input.requests > 0 ? input.errors / input.requests : 0;
+  if (errorRate > ERROR_RATE_THRESHOLD) {
+    return {
+      healthy: false,
+      severity: 'degraded',
+      reason: `${Math.round(errorRate * 100)}% errors`,
+    };
+  }
+
+  // Throttling and a non-empty DLQ are worth surfacing but are not cell
+  // ill-health: a tenant exceeding its budget is the limiter working, and DLQ
+  // messages are a historical record rather than a live symptom.
+  if (input.throttled > 0) {
+    return { healthy: true, severity: 'warning', reason: `${input.throttled} throttled` };
+  }
+  if (input.dlq > 0) {
+    return { healthy: true, severity: 'warning', reason: `${input.dlq} in DLQ` };
+  }
+
+  return { healthy: true, severity: 'ok', reason: 'healthy' };
 }
 
 async function readFault(cellId: string): Promise<FaultMode> {

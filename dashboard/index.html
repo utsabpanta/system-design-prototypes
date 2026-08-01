@@ -40,22 +40,32 @@
     border: 1px solid var(--line); color: var(--muted); text-transform: uppercase;
   }
   .tag.silo { color: var(--silo); border-color: var(--silo); }
-  .fault { margin-left: auto; font-size: 11px; }
+  .fault { margin-left: auto; font-size: 11px; white-space: nowrap; }
   .fault.none { color: var(--muted); }
+  .fault.warn { color: var(--warn); }
   .fault.active { color: var(--bad); font-weight: 600; }
 
   .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 10px; }
   .stat { background: #0d1117; border: 1px solid var(--line); border-radius: 4px; padding: 6px 8px; }
-  .stat .k { color: var(--muted); font-size: 10px; text-transform: uppercase; }
-  .stat .v { font-size: 15px; font-weight: 600; }
+  .stat .k { color: var(--muted); font-size: 10px; text-transform: uppercase;
+             white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .stat .v { font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .stat .v .sub { font-size: 11px; font-weight: 400; color: var(--muted); }
   .v.bad { color: var(--bad); } .v.warn { color: var(--warn); } .v.ok { color: var(--ok); }
 
-  table { width: 100%; border-collapse: collapse; }
-  th { text-align: left; color: var(--muted); font-weight: 500; font-size: 10px;
+  /* table-layout:fixed + explicit widths so the columns land in the same place
+     in every card. With auto layout each card sized its own columns to its own
+     content, so the numbers zig-zagged across the grid. */
+  table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+  th { color: var(--muted); font-weight: 500; font-size: 10px;
        text-transform: uppercase; padding: 4px 6px; border-bottom: 1px solid var(--line); }
   td { padding: 4px 6px; border-bottom: 1px solid #1c222b; }
   tr:last-child td { border-bottom: none; }
-  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  /* th.num was missing, so headers stayed left-aligned above right-aligned
+     numbers — the visible misalignment. Both are right-aligned now. */
+  th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  th.txt, td.txt { text-align: left; }
+  td.name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .premium { color: var(--silo); }
   .st-READ_ONLY { color: var(--warn); font-weight: 600; }
   .st-SUSPENDED { color: var(--bad); }
@@ -78,8 +88,12 @@
     <span>cells <b id="t-cells">–</b></span>
     <span>tenants <b id="t-tenants">–</b></span>
     <span>migrating <b id="t-migrating">–</b></span>
-    <span>unhealthy <b id="t-unhealthy">–</b></span>
-    <span>router rps <b id="t-rps">–</b></span>
+    <span title="cells down (fault or unreachable) / degraded by error rate">
+      down <b id="t-unhealthy">–</b> · degraded <b id="t-degraded">–</b></span>
+    <span title="Router throughput averaged over the 5-minute window, not an instantaneous rate">
+      router <b id="t-rps">–</b> rps avg</span>
+    <span title="Requests rejected at the router for exceeding a tenant's budget">
+      429s <b id="t-throttled">–</b></span>
     <span id="t-updated">–</span>
   </div>
 </header>
@@ -97,13 +111,11 @@
 const $ = (id) => document.getElementById(id);
 const num = (n) => (n ?? 0).toLocaleString();
 
-function cellClass(cell) {
-  if (!cell.healthy) return 'cell bad';
-  const m = cell.metrics;
-  if (m && m.requests > 0 && m.errors / m.requests > 0.05) return 'cell bad';
-  if ((m && m.throttled > 0) || (cell.queue && cell.queue.dlq > 0)) return 'cell warn';
-  return 'cell';
-}
+// The server decides health once (cellHealth in services/admin) and sends a
+// severity. The UI only maps it to a colour — it no longer re-derives health
+// from raw numbers, which is how the border, the badge, and the header count
+// previously ended up disagreeing with each other.
+const SEVERITY_CLASS = { down: 'cell bad', degraded: 'cell bad', warning: 'cell warn', ok: 'cell' };
 
 function renderCell(cell) {
   const m = cell.metrics ?? { requests: 0, errors: 0, throttled: 0, avgLatencyMs: 0, byTenant: {} };
@@ -111,41 +123,53 @@ function renderCell(cell) {
   const fill = Math.min(100, Math.round((cell.tenants.length / cell.capacity) * 100));
 
   const rows = cell.tenants.length
-    ? cell.tenants.map((t) => {
-        const tm = m.byTenant?.[t.tenantId] ?? { requests: 0, errors: 0, throttled: 0 };
-        return `<tr>
-          <td class="${t.tier === 'premium' ? 'premium' : ''}">${t.tenantId}</td>
-          <td class="st-${t.status}">${t.status === 'ACTIVE' ? '' : t.status}</td>
-          <td class="num">${num(tm.requests)}</td>
-          <td class="num" style="color:${tm.errors ? 'var(--bad)' : 'inherit'}">${num(tm.errors)}</td>
-          <td class="num" style="color:${tm.throttled ? 'var(--warn)' : 'inherit'}">${num(tm.throttled)}</td>
-        </tr>`;
-      }).join('')
+    ? cell.tenants.map((t) => `<tr>
+          <td class="name txt ${t.tier === 'premium' ? 'premium' : ''}"
+              title="${t.tenantId}${t.tier === 'premium' ? ' (premium)' : ''}">${t.tenantId}</td>
+          <td class="txt st-${t.status}">${t.status === 'ACTIVE' ? '' : t.status}</td>
+          <td class="num">${num(t.requests)}</td>
+          <td class="num" style="color:${t.errors ? 'var(--bad)' : 'inherit'}">${num(t.errors)}</td>
+          <td class="num" style="color:${t.throttled ? 'var(--warn)' : 'inherit'}">${num(t.throttled)}</td>
+        </tr>`).join('')
     : '<tr><td colspan="5" class="empty">no tenants placed</td></tr>';
 
-  return `<div class="${cellClass(cell)}">
+  const badgeClass = cell.severity === 'ok' ? 'none' : cell.severity === 'warning' ? 'warn' : 'active';
+  const badgeIcon = cell.severity === 'ok' ? '' : cell.severity === 'warning' ? '▲ ' : '⚠ ';
+
+  return `<div class="${SEVERITY_CLASS[cell.severity] ?? 'cell'}">
     <div class="cell-head">
       <span class="cell-id">${cell.cellId}</span>
       <span class="tag ${cell.tier}">${cell.tier}</span>
-      <span class="fault ${cell.fault === 'none' ? 'none' : 'active'}">
-        ${cell.fault === 'none' ? 'healthy' : '⚠ ' + cell.fault}
+      <span class="fault ${badgeClass}" title="severity: ${cell.severity}">
+        ${badgeIcon}${cell.reason}
       </span>
     </div>
     <div class="stats">
       <div class="stat"><div class="k">req/5m</div><div class="v">${num(m.requests)}</div></div>
       <div class="stat"><div class="k">errors</div><div class="v ${m.errors ? 'bad' : 'ok'}">${num(m.errors)}</div></div>
-      <div class="stat"><div class="k">429s</div><div class="v ${m.throttled ? 'warn' : 'ok'}">${num(m.throttled)}</div></div>
-      <div class="stat"><div class="k">avg ms</div><div class="v">${num(m.avgLatencyMs)}</div></div>
+      <div class="stat" title="Throttled at the router before reaching this cell, attributed via each tenant's cell">
+        <div class="k">429s</div><div class="v ${m.throttled ? 'warn' : 'ok'}">${num(m.throttled)}</div></div>
+      <div class="stat" title="mean / peak request latency over the window">
+        <div class="k">latency ms</div><div class="v">${num(m.avgLatencyMs)}<span class="sub"> / ${num(m.maxLatencyMs)}</span></div></div>
     </div>
     <div class="stats">
       <div class="stat"><div class="k">queued</div><div class="v">${num(q.visible)}</div></div>
       <div class="stat"><div class="k">in flight</div><div class="v">${num(q.inFlight)}</div></div>
-      <div class="stat"><div class="k">dlq</div><div class="v ${q.dlq ? 'warn' : 'ok'}">${num(q.dlq)}</div></div>
+      <div class="stat" title="Cumulative, not windowed — messages stay until purged">
+        <div class="k">dlq</div><div class="v ${q.dlq ? 'warn' : 'ok'}">${num(q.dlq)}</div></div>
       <div class="stat"><div class="k">tenants</div><div class="v">${cell.tenants.length}/${cell.capacity}</div></div>
     </div>
-    <div class="bar"><i class="${fill >= 100 ? 'full' : ''}" style="width:${fill}%"></i></div>
+    <div class="bar" title="${cell.tenants.length} of ${cell.capacity} tenant slots used">
+      <i class="${fill >= 100 ? 'full' : ''}" style="width:${fill}%"></i></div>
     <table>
-      <thead><tr><th>tenant</th><th></th><th class="num">req</th><th class="num">err</th><th class="num">429</th></tr></thead>
+      <colgroup>
+        <col style="width:34%"><col style="width:18%">
+        <col style="width:16%"><col style="width:16%"><col style="width:16%">
+      </colgroup>
+      <thead><tr>
+        <th class="txt">tenant</th><th class="txt"></th>
+        <th class="num">req</th><th class="num">err</th><th class="num">429</th>
+      </tr></thead>
       <tbody>${rows}</tbody>
     </table>
   </div>`;
@@ -162,12 +186,18 @@ async function tick() {
     $('t-tenants').textContent = data.totals.tenants;
     $('t-migrating').textContent = data.totals.migrating;
     $('t-unhealthy').textContent = data.totals.unhealthyCells;
+    $('t-degraded').textContent = data.totals.degradedCells ?? 0;
     $('t-rps').textContent = data.router
       ? (data.router.requests / (data.router.windowMinutes * 60)).toFixed(1)
       : '–';
+    $('t-throttled').textContent = data.router ? num(data.router.throttled) : '–';
     $('t-updated').textContent = new Date(data.generatedAt).toLocaleTimeString();
 
-    $('cells').innerHTML = data.cells.map(renderCell).join('');
+    // Sorted so a cell never jumps position between polls.
+    $('cells').innerHTML = [...data.cells]
+      .sort((a, b) => a.cellId.localeCompare(b.cellId))
+      .map(renderCell)
+      .join('');
   } catch (err) {
     $('err').textContent = 'poll failed: ' + err.message;
   }
