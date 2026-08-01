@@ -15,8 +15,23 @@ usually asserted in design docs are things you can **trigger and watch**:
 | A live tenant can be moved between cells | `pnpm run migrate --tenant acme --to cell-b` |
 | A failed migration leaves no trace | add `--fail-after-copy` to the above |
 
-📐 **[ARCHITECTURE.md](./ARCHITECTURE.md)** — the design, the trade-offs, and an
-honest table of how this differs from real AWS.
+### New to cell-based architecture?
+
+Read **[ARCHITECTURE.md §1 — Concepts](./ARCHITECTURE.md#1-concepts)** first. It
+explains the vocabulary from scratch — what a *cell* is, what a *tenant* is, the
+difference between the *control plane* and the *data plane*, and what problem the
+whole pattern exists to solve — with each term linked to the file that implements
+it here.
+
+The one-paragraph version: instead of running one big system that every customer
+shares, you run several complete independent copies of it (**cells**) and assign
+each customer (**tenant**) to one. When something breaks, it breaks one cell
+instead of everyone — the **blast radius** of a failure is bounded by design
+rather than by hope. The rest is detail about doing that without accidentally
+reintroducing something shared.
+
+📐 The rest of **[ARCHITECTURE.md](./ARCHITECTURE.md)** covers the design, the
+trade-offs, and an honest table of how this differs from real AWS.
 
 ---
 

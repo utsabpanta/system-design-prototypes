@@ -3,9 +3,222 @@
 Design notes for the cell-based multi-tenant prototype. For how to run it, see
 [README.md](./README.md).
 
+**New to this?** Start with §1 — it explains the vocabulary from scratch. If you
+already know what cells and control planes are, skip to §2.
+
+1. [Concepts](#1-concepts) — what cells, tenants, and control planes actually are
+2. [The shape](#2-the-shape) — how this system is wired
+3. [Design decisions](#3-design-decisions) — why, and what was rejected
+4. [Tenant migration](#4-tenant-migration) — moving a live tenant between cells
+5. [What's different from real AWS](#5-whats-different-from-real-aws)
+6. [Repository layout](#6-repository-layout)
+7. [Bugs these tests caught](#7-bugs-these-tests-caught)
+
 ---
 
-## 1. The shape
+## 1. Concepts
+
+### The problem cell-based architecture solves
+
+Start with the ordinary way to build a service: one fleet of servers, one
+database, every customer sharing it.
+
+```
+   all customers ──► one big service ──► one big database
+```
+
+This works well until something goes wrong. When it does, it goes wrong for
+*everyone at once*: a bad deploy, a poison message, a runaway query, a corrupted
+cache entry, one customer's traffic spike. The **blast radius** — the set of
+users affected by a single failure — is 100% of them.
+
+You can improve reliability at the margins (better tests, canary deploys,
+autoscaling), but you cannot change the shape of the failure. A single shared
+system has a single fate.
+
+**Cell-based architecture changes the shape.** Instead of one big system, you run
+several complete, independent copies of it, and assign each customer to one:
+
+```
+   customers A,B,C ──► cell-1 (own compute, own database, own queue)
+   customers D,E,F ──► cell-2 (own compute, own database, own queue)
+   customers G,H   ──► cell-3 (own compute, own database, own queue)
+```
+
+Now the same failure takes out one cell. If a customer is in cell-2 and cell-1
+dies, they genuinely do not notice — not because cell-1 failed gracefully, but
+because *they were never touching cell-1 at all*. With three cells, the blast
+radius of one failure is roughly a third of your customers. With ten, a tenth.
+
+That is the entire idea. Everything else is detail about how to do it without
+accidentally reintroducing something shared.
+
+> This is the property [`test/integration/blast-radius.test.ts`](./test/integration/blast-radius.test.ts)
+> asserts: break one cell, then prove every other cell still serves 100% of its
+> requests. If cells ever grow a shared component, that test goes red.
+
+### Cell
+
+A **cell** is one complete, self-sufficient copy of your service — everything a
+request needs, end to end. In this prototype a cell is an API Gateway, a Lambda,
+a DynamoDB table, an SQS queue, a worker Lambda, and its own metrics table, all
+in one CloudFormation stack ([`infra/lib/cell-stack.ts`](./infra/lib/cell-stack.ts)).
+
+Two properties make a cell a cell rather than just a deployment:
+
+1. **Self-sufficient.** A request is served entirely inside one cell. No cell
+   calls another cell, and no cell depends on a shared database.
+2. **Independently deployable.** You can deploy, break, or delete one cell
+   without touching the others.
+
+Cells are also **identical by construction** — the same code instantiated N
+times, not N hand-maintained environments. That is what lets you argue a change
+tested in one cell behaves the same in the rest.
+
+Cells are usually kept deliberately *small*. A bigger cell serves more customers,
+which means a bigger blast radius when it fails — so cells have a **capacity**,
+and growth is handled by adding cells rather than growing them.
+
+### Tenant
+
+A **tenant** is one customer of your system — a company, an organisation, an
+account. "Multi-tenant" means many tenants share the same infrastructure, which
+is what makes SaaS economics work: you do not spin up a private copy of your
+stack for every signup.
+
+The catch is that tenants must never see each other's data, and one tenant must
+never be able to degrade another's experience. Most of the difficulty in
+multi-tenant systems is enforcing those two things.
+
+In this prototype tenants are `acme`, `globex`, `bigco`, and so on
+([`tools/seed.ts`](./tools/seed.ts)), identified by an `x-tenant-id` header.
+
+### Data plane and control plane
+
+A useful split, borrowed from networking:
+
+| | **Data plane** | **Control plane** |
+|---|---|---|
+| Does what | Serves actual user traffic | Manages the system itself |
+| Here | the cells | tenant records, the tenant→cell map, placement, migration |
+| Request rate | high — every user request | low — onboarding, admin, deploys |
+| If it goes down | users are affected immediately | running traffic is fine; you just cannot make changes |
+
+The critical rule: **the data plane must not depend on the control plane to keep
+serving.** If onboarding new tenants breaks, existing tenants should not notice.
+A cell that has to phone home on every request has made the control plane a
+shared dependency — and thereby recreated the single point of failure that cells
+were supposed to eliminate.
+
+This prototype respects that in two visible ways: cells discover each other
+through SSM at startup rather than calling the control plane per request, and
+metrics are *pulled* from cells by the dashboard rather than pushed by cells into
+shared storage (§3, "Cells own their telemetry").
+
+The one exception is the router, discussed next.
+
+### Cell router
+
+Something has to answer "which cell serves this tenant?" That is the **cell
+router** ([`packages/services/router/index.ts`](./packages/services/router/index.ts)).
+
+It is the one component every request passes through, which makes it the most
+dangerous piece of the design: a fat, stateful, business-logic-laden router is a
+shared component, and a shared component is the thing cells exist to avoid. So
+routers are kept deliberately dumb. This one does exactly three things — look up
+the tenant's cell (from a 5-second cache), check the tenant's rate limit, and
+forward the request. It holds no business logic and never touches a cell's
+database.
+
+On real AWS this job is often done by DNS (Route 53) or a load balancer rather
+than by code, which removes it from the request path almost entirely. See §5 for
+why this prototype uses a Lambda instead.
+
+### Tenant isolation: pooled, silo, and bridge
+
+How much do tenants actually share? Three standard answers:
+
+| Model | What it means | Upside | Downside |
+|---|---|---|---|
+| **Pooled** | Tenants share infrastructure; separated by a tenant id on every row | Cheap, efficient, easy to operate | Isolation depends entirely on correct code and correct IAM |
+| **Silo** | Each tenant gets dedicated infrastructure | Strongest isolation; noisy neighbours impossible | Expensive; does not scale to thousands of tenants |
+| **Bridge** | Both — pooled by default, silo for tenants who need it | Matches cost to requirement | Two paths to build and maintain |
+
+This prototype implements **bridge** (also called tiered): `standard` tenants
+share a pooled cell, partitioned by `pk = TENANT#<id>`; `premium` tenants get a
+silo cell to themselves. Placement logic lives in
+[`packages/shared/placement.ts`](./packages/shared/placement.ts).
+
+Note that a *cell* and a *silo* are different ideas that are easy to conflate.
+Cells limit blast radius for everyone. A silo cell is just a cell whose capacity
+happens to be one tenant.
+
+### Noisy neighbour
+
+The failure mode where one tenant's *success* hurts everyone sharing its
+infrastructure: they discover a for-loop, send 50× their usual traffic, and
+consume the capacity their co-tenants needed.
+
+Note this is the opposite of the blast-radius problem. Cells contain a tenant
+being *broken*; they do not contain a tenant being *too popular*, because a
+greedy tenant inside a cell is using that cell's legitimate capacity. You need a
+second mechanism — a per-tenant rate limit
+([`packages/shared/rate-limiter.ts`](./packages/shared/rate-limiter.ts)) — so the
+abuser absorbs its own throttling.
+
+### Bulkhead
+
+From ship design: a hull divided into sealed compartments so one breach floods
+one compartment instead of sinking the vessel. In software it means any hard
+partition of a shared resource.
+
+This prototype has two: the cell boundary itself, and per-cell **reserved
+concurrency**, so one cell saturating under load cannot consume the whole
+account's Lambda capacity and starve its siblings.
+
+### Placement and capacity
+
+**Placement** is choosing which cell a new tenant goes into. This prototype picks
+the least-loaded eligible cell, and — importantly — **refuses to overfill**. When
+every cell is at capacity, onboarding fails with `507` and a message telling you
+to deploy another cell.
+
+That refusal is a feature, not an oversight. Silently exceeding capacity grows
+the blast radius of the cell you overfilled, quietly erasing the property you
+built the whole architecture to get. Try it: `pnpm run tenant add newco --tier premium`.
+
+### Tenant migration
+
+Moving a live tenant from one cell to another, without losing data and ideally
+without downtime. You need it to rebalance a hot cell, to drain a cell before
+retiring it, or to move a tenant who upgraded from pooled to silo.
+
+Migration is the reason this system stores an **explicit** tenant→cell mapping
+instead of computing one with `hash(tenantId) % cellCount`. A hash needs no
+state, but relocating a single tenant under a hash means changing the hash, which
+relocates *everybody*. §4 walks through the migration workflow step by step.
+
+### Putting the vocabulary together
+
+> A **tenant** is a customer. Tenants are assigned to **cells** — complete,
+> independent copies of the **data plane** — by a **control plane**, whose
+> **placement** logic respects each cell's **capacity**. A thin **cell router**
+> sends each request to its tenant's cell. Because cells share nothing, a
+> failure's **blast radius** is one cell. Because tenants inside a pooled cell
+> *do* share, a **rate limit** stops **noisy neighbours**, **bulkheads** stop one
+> cell starving another, and **silo** cells exist for tenants who need physical
+> separation. **Migration** moves a tenant between cells when the assignment
+> needs to change.
+
+### Where to read more
+
+- [AWS Well-Architected: Reducing scope of impact with cell-based architecture](https://docs.aws.amazon.com/wellarchitected/latest/reducing-scope-of-impact-with-cell-based-architecture/)
+- [AWS SaaS Lens: tenant isolation strategies](https://docs.aws.amazon.com/wellarchitected/latest/saas-lens/)
+- [Shuffle sharding](https://aws.amazon.com/builders-library/workload-isolation-using-shuffle-sharding/) — a refinement where tenants get overlapping *combinations* of cells, so no two tenants share exactly the same fate. Not implemented here, but the natural next step.
+
+---
+
+## 2. The shape
 
 ```
                     ┌──────────────── CONTROL PLANE (one stack) ─────────────────┐
@@ -46,7 +259,7 @@ dashboard can attribute any request to a cell without inference.
 
 ---
 
-## 2. Design decisions
+## 3. Design decisions
 
 ### Cells are independent CloudFormation stacks
 
@@ -160,7 +373,7 @@ Two separate mechanisms limit blast radius:
 
 ---
 
-## 3. Tenant migration
+## 4. Tenant migration
 
 The operation that justifies the explicit routing map. Implemented as a Step
 Functions state machine over `packages/services/migration/index.ts`.
@@ -195,7 +408,7 @@ because the migrating tenant is already frozen and cannot enqueue anything new.
 
 ---
 
-## 4. What's different from real AWS
+## 5. What's different from real AWS
 
 Everything here is a consequence of the free LocalStack tier or of running on a
 laptop. **Nothing in this list is a property of the architecture.**
@@ -226,7 +439,7 @@ whether cells should span AZs.
 
 ---
 
-## 5. Repository layout
+## 6. Repository layout
 
 ```
 infra/
@@ -263,13 +476,13 @@ dashboard/index.html          2s-polling live view
 
 ---
 
-## 6. Bugs these tests caught
+## 7. Bugs these tests caught
 
 Both are left documented in the code, because the failure modes are the
 instructive part.
 
 **The rate limiter failed open under load.** The original optimistic-locking
-design was defeated by exactly the burst it existed to shed — see §2 above and
+design was defeated by exactly the burst it existed to shed — see §3 above and
 the comment block in `packages/shared/rate-limiter.ts`.
 
 **Migration rollback left 191 orphaned rows.** Rollback correctly restored
