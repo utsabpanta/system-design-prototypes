@@ -16,8 +16,15 @@ PASS=0
 FAIL=0
 FAILED_SERVICES=()
 
-# Reports but never fails the run — for services we know are Pro-only and have
-# already designed around. Keeps the finding visible instead of buried in docs.
+# check()      = the architecture genuinely depends on this; a failure here
+#                means "do not bother deploying, it will not work".
+# info_check() = reported but never fatal — either a Pro-only service we
+#                designed around, or one this build simply does not use.
+#
+# Keeping that line honest matters: gating on an unused service turns an
+# irrelevant emulator quirk into a red build. CloudWatch PutMetricData did
+# exactly that on CI (a newer AWS CLI could not speak LocalStack's query
+# protocol) even though metrics here are stored in DynamoDB, not CloudWatch.
 info_check() {
   local name="$1"; shift
   if "$@" >/dev/null 2>&1; then
@@ -75,13 +82,13 @@ check "sqs:CreateQueue/DeleteQueue" bash -c "
   url=\$(aws --endpoint-url $ENDPOINT sqs create-queue --queue-name sdp-smoke --query QueueUrl --output text) &&
   aws --endpoint-url $ENDPOINT sqs delete-queue --queue-url \$url"
 
-check "sns:CreateTopic/DeleteTopic" bash -c "
-  arn=\$(aws --endpoint-url $ENDPOINT sns create-topic --name sdp-smoke --query TopicArn --output text) &&
-  aws --endpoint-url $ENDPOINT sns delete-topic --topic-arn \$arn"
+# Not used by the current design — a cell's async path is SQS end to end.
+# Checked anyway so that adding fan-out later starts from a known answer.
+info_check "sns:CreateTopic" \
+  aws_ sns create-topic --name sdp-smoke
 
-check "events:CreateEventBus/DeleteEventBus" bash -c "
-  aws --endpoint-url $ENDPOINT events create-event-bus --name sdp-smoke >/dev/null &&
-  aws --endpoint-url $ENDPOINT events delete-event-bus --name sdp-smoke"
+info_check "events:CreateEventBus" \
+  aws_ events create-event-bus --name sdp-smoke
 
 # ---------------------------------------------------------------- compute + api
 check "lambda:ListFunctions" \
@@ -109,9 +116,15 @@ check "ssm:PutParameter/DeleteParameter" bash -c "
   aws --endpoint-url $ENDPOINT ssm put-parameter --name /sdp/smoke --value ok --type String --overwrite >/dev/null &&
   aws --endpoint-url $ENDPOINT ssm delete-parameter --name /sdp/smoke"
 
-check "cloudwatch:PutMetricData" \
+# Metrics are kept in each cell's own DynamoDB table, not CloudWatch (see
+# packages/shared/metrics.ts for why), so this is informational. It also fails
+# on newer AWS CLIs, which send a protocol LocalStack's cloudwatch mock does
+# not accept — an emulator quirk in a service nothing here depends on.
+info_check "cloudwatch:PutMetricData" \
   aws_ cloudwatch put-metric-data --namespace sdp/smoke --metric-name Smoke --value 1
 
+# Required: Lambda writes execution logs here, and it is the first place to
+# look when a handler misbehaves.
 check "logs:DescribeLogGroups" \
   aws_ logs describe-log-groups
 

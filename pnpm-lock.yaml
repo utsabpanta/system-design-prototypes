@@ -8,16 +8,7 @@ importers:
 
   .:
     dependencies:
-      '@aws-sdk/client-cloudformation':
-        specifier: ^3.1096.0
-        version: 3.1101.0
-      '@aws-sdk/client-cloudwatch':
-        specifier: ^3.1096.0
-        version: 3.1101.0
       '@aws-sdk/client-dynamodb':
-        specifier: ^3.1096.0
-        version: 3.1101.0
-      '@aws-sdk/client-eventbridge':
         specifier: ^3.1096.0
         version: 3.1101.0
       '@aws-sdk/client-sfn':
@@ -82,20 +73,8 @@ packages:
       - jsonschema
       - semver
 
-  '@aws-sdk/client-cloudformation@3.1101.0':
-    resolution: {integrity: sha512-ydqM2G9bhuVWp791J1L9k4sfBpgE6r8h1iED91xNtdY4hYrIBCsQOVMoyzfr8ZO5QPPMvhn5dih2lN2DfptVvQ==}
-    engines: {node: '>=20.0.0'}
-
-  '@aws-sdk/client-cloudwatch@3.1101.0':
-    resolution: {integrity: sha512-ZPqPMfrTB1P6sraLBYUpebyaWY3losWaUwjDtGNBcbQ4kcoO83TXKGg5DeOO7Yu4hghznguyRpF/R4N/zPn6LQ==}
-    engines: {node: '>=20.0.0'}
-
   '@aws-sdk/client-dynamodb@3.1101.0':
     resolution: {integrity: sha512-3tlBfiRdksyqFggcMsN3AOA9uaqEbt5OK6Ym0MfUxKqLIOwdAlfCKL2GvE8qC0xa2dwPegIDs+grTRpBtzNILQ==}
-    engines: {node: '>=20.0.0'}
-
-  '@aws-sdk/client-eventbridge@3.1101.0':
-    resolution: {integrity: sha512-BZwGOvV+FcPcQqcnBHL11+qgHsaLAz+x01m+ppDXHpI6Tzhy4zsgp2LXESGzkLDrSk4DnzItkF38q1j9VX0ZVA==}
     engines: {node: '>=20.0.0'}
 
   '@aws-sdk/client-sfn@3.1101.0':
@@ -483,10 +462,6 @@ packages:
     resolution: {integrity: sha512-4fW86pEUOMbrD5nkbyl/tTvPHHWJFbuB2odl6ps9lWfHoXf9HWh3Q/Smh59qH1g7+c/BSZghX6bbUk4gsiMs8A==}
     engines: {node: '>=18.0.0'}
 
-  '@smithy/middleware-compression@4.5.16':
-    resolution: {integrity: sha512-VwD+5B6lkieGIGxFx4pSXFZpevLJj3fl8JayvGHojnS5AblrvVJfz1DvCVJEg3XrMCBvs6HZa1znW9Is4xeFcg==}
-    engines: {node: '>=18.0.0'}
-
   '@smithy/node-http-handler@4.9.13':
     resolution: {integrity: sha512-Nmd/Nl35zfYrd+a6OO2cDJb3GPh9bgTjIUhcM+JFfjpp8/osCgboDV5nCT1I01Pv6R13eSKDKLSoVa5ZB6Zsfw==}
     engines: {node: '>=18.0.0'}
@@ -746,9 +721,6 @@ packages:
       picomatch:
         optional: true
 
-  fflate@0.8.1:
-    resolution: {integrity: sha512-/exOvEuc+/iaUm105QIiOt4LpBdMTWsXxqR0HDF35vx3fmaKzw7354gTilCh5rkzEt8WYyG//ku3h3nRmd7CHQ==}
-
   fsevents@2.3.3:
     resolution: {integrity: sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw==}
     engines: {node: ^8.16.0 || ^10.6.0 || >=11.0.0}
@@ -1007,47 +979,12 @@ snapshots:
 
   '@aws-cdk/cloud-assembly-schema@54.15.0': {}
 
-  '@aws-sdk/client-cloudformation@3.1101.0':
-    dependencies:
-      '@aws-sdk/core': 3.977.4
-      '@aws-sdk/credential-provider-node': 3.972.76
-      '@aws-sdk/types': 3.974.2
-      '@smithy/core': 3.31.1
-      '@smithy/fetch-http-handler': 5.6.13
-      '@smithy/node-http-handler': 4.9.13
-      '@smithy/types': 4.16.1
-      tslib: 2.8.1
-
-  '@aws-sdk/client-cloudwatch@3.1101.0':
-    dependencies:
-      '@aws-sdk/core': 3.977.4
-      '@aws-sdk/credential-provider-node': 3.972.76
-      '@aws-sdk/types': 3.974.2
-      '@smithy/core': 3.31.1
-      '@smithy/fetch-http-handler': 5.6.13
-      '@smithy/middleware-compression': 4.5.16
-      '@smithy/node-http-handler': 4.9.13
-      '@smithy/types': 4.16.1
-      tslib: 2.8.1
-
   '@aws-sdk/client-dynamodb@3.1101.0':
     dependencies:
       '@aws-sdk/core': 3.977.4
       '@aws-sdk/credential-provider-node': 3.972.76
       '@aws-sdk/dynamodb-codec': 3.973.39
       '@aws-sdk/middleware-endpoint-discovery': 3.972.27
-      '@aws-sdk/types': 3.974.2
-      '@smithy/core': 3.31.1
-      '@smithy/fetch-http-handler': 5.6.13
-      '@smithy/node-http-handler': 4.9.13
-      '@smithy/types': 4.16.1
-      tslib: 2.8.1
-
-  '@aws-sdk/client-eventbridge@3.1101.0':
-    dependencies:
-      '@aws-sdk/core': 3.977.4
-      '@aws-sdk/credential-provider-node': 3.972.76
-      '@aws-sdk/signature-v4-multi-region': 3.996.43
       '@aws-sdk/types': 3.974.2
       '@smithy/core': 3.31.1
       '@smithy/fetch-http-handler': 5.6.13
@@ -1449,13 +1386,6 @@ snapshots:
       '@smithy/types': 4.16.1
       tslib: 2.8.1
 
-  '@smithy/middleware-compression@4.5.16':
-    dependencies:
-      '@smithy/core': 3.31.1
-      '@smithy/types': 4.16.1
-      fflate: 0.8.1
-      tslib: 2.8.1
-
   '@smithy/node-http-handler@4.9.13':
     dependencies:
       '@smithy/core': 3.31.1
@@ -1663,8 +1593,6 @@ snapshots:
   fdir@6.5.0(picomatch@4.0.5):
     optionalDependencies:
       picomatch: 4.0.5
-
-  fflate@0.8.1: {}
 
   fsevents@2.3.3:
     optional: true

@@ -10,7 +10,6 @@ import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { SQSClient } from '@aws-sdk/client-sqs';
 import { SSMClient } from '@aws-sdk/client-ssm';
 import { STSClient } from '@aws-sdk/client-sts';
-import { EventBridgeClient } from '@aws-sdk/client-eventbridge';
 import { SFNClient } from '@aws-sdk/client-sfn';
 
 export const REGION = process.env.AWS_REGION ?? 'us-east-1';
@@ -62,12 +61,6 @@ let sfn: SFNClient | undefined;
 export function sfnClient(): SFNClient {
   sfn ??= new SFNClient(baseConfig());
   return sfn;
-}
-
-let events: EventBridgeClient | undefined;
-export function eventsClient(): EventBridgeClient {
-  events ??= new EventBridgeClient(baseConfig());
-  return events;
 }
 
 /**
